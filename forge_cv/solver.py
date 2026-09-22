@@ -1,6 +1,8 @@
 """CV alignment solver — feature-based alignment with multiple detectors."""
 
 import math
+import os
+import sys
 
 import cv2
 import numpy as np
@@ -228,6 +230,13 @@ def _solve_superpoint(gray_a, gray_b, frame_index, ransac_thresh, mode):
     Much more robust than SIFT/AKAZE for large scale gaps and
     cross-appearance pairs (raw plate vs graded offline).
     """
+    # Offline bundles (packaging/build_bundle.sh) ship the SuperPoint and
+    # LightGlue weights inside the env; point torch.hub there so nothing is
+    # downloaded. An explicit TORCH_HOME still wins.
+    bundled_weights = os.path.join(sys.prefix, "share", "forge-cv", "torch")
+    if not os.environ.get("TORCH_HOME") and os.path.isdir(bundled_weights):
+        os.environ["TORCH_HOME"] = bundled_weights
+
     try:
         import torch
         from lightglue import LightGlue, SuperPoint

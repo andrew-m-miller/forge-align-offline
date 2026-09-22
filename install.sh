@@ -11,6 +11,8 @@
 #   bash install.sh --global                # full install, global deploy
 #   bash install.sh --project /path/to/proj # full install, project deploy
 #   bash install.sh --env myenv --global    # specify conda env
+#   bash install.sh --python /path/env/bin/python --global
+#                                           # use a prebuilt env (offline bundle)
 #
 # Deploy targets are saved in ~/.forge/config.yaml and reused by
 # --deploy-only. Add more with --project (cumulative).
@@ -39,6 +41,7 @@ ENV_NAME=""
 PROJECT_PATHS=()
 DEPLOY_GLOBAL=""
 DEPLOY_ONLY=""
+PREBUILT_PYTHON=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -46,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         --project)      PROJECT_PATHS+=("$2");  shift 2 ;;
         --global)       DEPLOY_GLOBAL="yes";    shift ;;
         --deploy-only)  DEPLOY_ONLY="yes";      shift ;;
+        --python)       PREBUILT_PYTHON="$2";   shift 2 ;;
         -h|--help)
             echo "Usage: bash install.sh [OPTIONS]"
             echo ""
@@ -54,6 +58,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --global          Deploy hook globally (/opt/Autodesk/shared/python)"
             echo "  --project PATH    Deploy to a Flame project (repeatable)"
             echo "  --deploy-only     Skip env/pip setup — just deploy, clear cache, verify"
+            echo "  --python PATH     Use a prebuilt env's python (skips env/pip setup;"
+            echo "                    used by the offline bundle's install_offline.sh)"
             echo "  -h, --help        Show this help"
             echo ""
             echo "Deploy targets are saved in ~/.forge/config.yaml and reused by --deploy-only."
@@ -186,119 +192,134 @@ CONDA_PYTHON=""
 
 if [[ -z "$DEPLOY_ONLY" ]]; then
 
-    # ── Step 1: Conda environment ──────────────────────────────────
-    if ! command -v conda &>/dev/null; then
-        err "conda not found. Install Miniconda or Anaconda first."
-        echo "  https://docs.anaconda.com/miniconda/"
-        exit 1
-    fi
-
-    if [[ -z "$ENV_NAME" ]]; then
-        read -rp "Conda environment name [$DEFAULT_ENV]: " ENV_NAME
-        ENV_NAME="${ENV_NAME:-$DEFAULT_ENV}"
-    fi
-
-    if ! conda env list | grep -q "^${ENV_NAME} "; then
-        info "Creating conda environment '$ENV_NAME' (Python 3.11)..."
-        conda create -n "$ENV_NAME" python=3.11 -y
-    else
-        ok "Conda environment '$ENV_NAME' exists"
-    fi
-
-    CONDA_BASE="$(conda info --base)"
-    ENV_BIN="${CONDA_BASE}/envs/${ENV_NAME}/bin"
-
-    # ── Step 2: Install forge_cv package ───────────────────────────
-    echo ""
-    # conda-forge ships matching OIIO + OCIO on linux-64 and osx-x86_64. On
-    # osx-arm64 the channel has no opencolorio package (and openimageio
-    # builds there lack OCIO), so go straight to PyPI wheels. Skipping the
-    # doomed conda attempt avoids a multi-minute solver run + an alarming
-    # "install failed" warning every time.
-    OS_KIND="$(uname -s)"
-    ARCH_KIND="$(uname -m)"
-    if [[ "$OS_KIND" == "Darwin" && "$ARCH_KIND" == "arm64" ]]; then
-        info "Installing OpenImageIO + OpenColorIO from PyPI (osx-arm64)..."
-        "$ENV_BIN/pip" install OpenImageIO opencolorio
-        ok "OIIO + OCIO installed from PyPI"
-    else
-        info "Installing OpenImageIO + OpenColorIO (forge-io runtime)..."
-        if conda install -n "$ENV_NAME" -c conda-forge openimageio opencolorio -y &>/dev/null; then
-            ok "OIIO + OCIO installed from conda-forge"
+    if [[ -n "$PREBUILT_PYTHON" ]]; then
+        # ── Prebuilt env (offline bundle): skip env create + pip ───────
+        if [[ ! -x "$PREBUILT_PYTHON" ]]; then
+            err "Python not found: $PREBUILT_PYTHON"
+            exit 1
+        fi
+        ENV_BIN="$(cd "$(dirname "$PREBUILT_PYTHON")" && pwd)"
+        if "$ENV_BIN/python" -c "import forge_io; from forge_cv.solver import solve_alignment" 2>/dev/null; then
+            ok "Prebuilt env: forge_io + forge_cv imports OK"
         else
-            warn "conda-forge OIIO/OCIO install failed; falling back to PyPI"
+            err "Prebuilt env at $ENV_BIN is missing forge_io / forge_cv"
+            exit 1
+        fi
+    else
+        # ── Step 1: Conda environment ──────────────────────────────────
+        if ! command -v conda &>/dev/null; then
+            err "conda not found. Install Miniconda or Anaconda first."
+            echo "  https://docs.anaconda.com/miniconda/"
+            exit 1
+        fi
+
+        if [[ -z "$ENV_NAME" ]]; then
+            read -rp "Conda environment name [$DEFAULT_ENV]: " ENV_NAME
+            ENV_NAME="${ENV_NAME:-$DEFAULT_ENV}"
+        fi
+
+        if ! conda env list | grep -q "^${ENV_NAME} "; then
+            info "Creating conda environment '$ENV_NAME' (Python 3.11)..."
+            conda create -n "$ENV_NAME" python=3.11 -y
+        else
+            ok "Conda environment '$ENV_NAME' exists"
+        fi
+
+        CONDA_BASE="$(conda info --base)"
+        ENV_BIN="${CONDA_BASE}/envs/${ENV_NAME}/bin"
+
+        # ── Step 2: Install forge_cv package ───────────────────────────
+        echo ""
+        # conda-forge ships matching OIIO + OCIO on linux-64 and osx-x86_64. On
+        # osx-arm64 the channel has no opencolorio package (and openimageio
+        # builds there lack OCIO), so go straight to PyPI wheels. Skipping the
+        # doomed conda attempt avoids a multi-minute solver run + an alarming
+        # "install failed" warning every time.
+        OS_KIND="$(uname -s)"
+        ARCH_KIND="$(uname -m)"
+        if [[ "$OS_KIND" == "Darwin" && "$ARCH_KIND" == "arm64" ]]; then
+            info "Installing OpenImageIO + OpenColorIO from PyPI (osx-arm64)..."
             "$ENV_BIN/pip" install OpenImageIO opencolorio
             ok "OIIO + OCIO installed from PyPI"
-        fi
-    fi
-
-    info "Installing forge_cv and CV dependencies..."
-    "$ENV_BIN/pip" install -e "$SCRIPT_DIR" 2>&1 | tail -3
-    ok "forge-align installed"
-
-    # ── Step 2b: Fix opencv-python conflict ────────────────────────
-    # lightglue (if installed) pulls in opencv-python which conflicts
-    # with our opencv-python-headless. Remove the non-headless variant.
-    if "$ENV_BIN/pip" show opencv-python &>/dev/null 2>&1; then
-        warn "opencv-python conflicts with opencv-python-headless — removing"
-        "$ENV_BIN/pip" uninstall opencv-python -y 2>&1 | tail -1
-        ok "opencv-python removed (headless variant retained)"
-    fi
-
-    # ── Step 2c: Optional SuperPoint deps ─────────────────────────
-    # torch + lightglue enable the SuperPoint detector (best for large
-    # scale gaps and cross-appearance matching). ~2 GB download.
-    if "$ENV_BIN/python" -c "import torch; from lightglue import SuperPoint" 2>/dev/null; then
-        ok "SuperPoint deps already installed (torch + lightglue)"
-    else
-        echo ""
-        echo "  Optional: SuperPoint detector (torch + lightglue)"
-        echo "  Best for large scale gaps and cross-appearance matching."
-        echo "  Requires ~2 GB download. SIFT works well for most cases."
-        echo ""
-        read -rp "  Install SuperPoint support? [y/N]: " INSTALL_SP
-        if [[ "$INSTALL_SP" =~ ^[Yy]$ ]]; then
-            info "Installing torch + lightglue (this may take a few minutes)..."
-            "$ENV_BIN/pip" install 'torch>=2.0.0' 'lightglue @ git+https://github.com/cvg/LightGlue.git' 2>&1 | tail -5
-            # lightglue pulls in opencv-python which replaces opencv-python-headless.
-            # Uninstalling opencv-python nukes the shared cv2 files, so headless
-            # must be force-reinstalled to restore them.
-            if "$ENV_BIN/pip" show opencv-python &>/dev/null 2>&1; then
-                "$ENV_BIN/pip" uninstall opencv-python -y &>/dev/null
-                "$ENV_BIN/pip" install --force-reinstall opencv-python-headless &>/dev/null
-            fi
-            if "$ENV_BIN/python" -c "import torch; from lightglue import SuperPoint" 2>/dev/null; then
-                ok "SuperPoint installed"
+        else
+            info "Installing OpenImageIO + OpenColorIO (forge-io runtime)..."
+            if conda install -n "$ENV_NAME" -c conda-forge openimageio opencolorio -y &>/dev/null; then
+                ok "OIIO + OCIO installed from conda-forge"
             else
-                warn "SuperPoint install failed — SIFT/AKAZE still available"
+                warn "conda-forge OIIO/OCIO install failed; falling back to PyPI"
+                "$ENV_BIN/pip" install OpenImageIO opencolorio
+                ok "OIIO + OCIO installed from PyPI"
             fi
-        else
-            info "Skipping SuperPoint (SIFT/AKAZE still available)"
         fi
-    fi
 
-    # ── Step 3: Verify import ──────────────────────────────────────
-    if "$ENV_BIN/python" -c "import forge_io; from forge_cv.solver import solve_alignment" 2>/dev/null; then
-        ok "forge_io + forge_cv imports OK"
-    else
-        warn "forge_cv import check failed — check install output above"
-    fi
+        info "Installing forge_cv and CV dependencies..."
+        "$ENV_BIN/pip" install -e "$SCRIPT_DIR" 2>&1 | tail -3
+        ok "forge-align installed"
 
-    # ── Step 4: Install ffmpeg (via conda, into the env) ─────────
-    # ffmpeg + ffprobe: forge-io v0.4.0+ decodes .mov/.mp4/... containers with
-    # them (hook injects FORGE_FFMPEG_PATH / FORGE_FFPROBE_PATH from this env);
-    # also used by the hook's .mxf fallback and ffprobe fps probe.
-    echo ""
-    if "$ENV_BIN/ffmpeg" -version &>/dev/null 2>&1; then
-        ok "ffmpeg found in env"
-    else
-        info "Installing ffmpeg into '$ENV_NAME'..."
-        conda install -n "$ENV_NAME" -c conda-forge ffmpeg -y 2>&1 | tail -3
-        if "$ENV_BIN/ffmpeg" -version &>/dev/null 2>&1; then
-            ok "ffmpeg installed"
+        # ── Step 2b: Fix opencv-python conflict ────────────────────────
+        # lightglue (if installed) pulls in opencv-python which conflicts
+        # with our opencv-python-headless. Remove the non-headless variant.
+        if "$ENV_BIN/pip" show opencv-python &>/dev/null 2>&1; then
+            warn "opencv-python conflicts with opencv-python-headless — removing"
+            "$ENV_BIN/pip" uninstall opencv-python -y 2>&1 | tail -1
+            ok "opencv-python removed (headless variant retained)"
+        fi
+
+        # ── Step 2c: Optional SuperPoint deps ─────────────────────────
+        # torch + lightglue enable the SuperPoint detector (best for large
+        # scale gaps and cross-appearance matching). ~2 GB download.
+        if "$ENV_BIN/python" -c "import torch; from lightglue import SuperPoint" 2>/dev/null; then
+            ok "SuperPoint deps already installed (torch + lightglue)"
         else
-            warn "ffmpeg install failed — MOV/MP4/MXF reference extraction won't work"
-            warn "Install manually: conda install -n $ENV_NAME -c conda-forge ffmpeg"
+            echo ""
+            echo "  Optional: SuperPoint detector (torch + lightglue)"
+            echo "  Best for large scale gaps and cross-appearance matching."
+            echo "  Requires ~2 GB download. SIFT works well for most cases."
+            echo ""
+            read -rp "  Install SuperPoint support? [y/N]: " INSTALL_SP
+            if [[ "$INSTALL_SP" =~ ^[Yy]$ ]]; then
+                info "Installing torch + lightglue (this may take a few minutes)..."
+                "$ENV_BIN/pip" install 'torch>=2.0.0' 'lightglue @ git+https://github.com/cvg/LightGlue.git' 2>&1 | tail -5
+                # lightglue pulls in opencv-python which replaces opencv-python-headless.
+                # Uninstalling opencv-python nukes the shared cv2 files, so headless
+                # must be force-reinstalled to restore them.
+                if "$ENV_BIN/pip" show opencv-python &>/dev/null 2>&1; then
+                    "$ENV_BIN/pip" uninstall opencv-python -y &>/dev/null
+                    "$ENV_BIN/pip" install --force-reinstall opencv-python-headless &>/dev/null
+                fi
+                if "$ENV_BIN/python" -c "import torch; from lightglue import SuperPoint" 2>/dev/null; then
+                    ok "SuperPoint installed"
+                else
+                    warn "SuperPoint install failed — SIFT/AKAZE still available"
+                fi
+            else
+                info "Skipping SuperPoint (SIFT/AKAZE still available)"
+            fi
+        fi
+
+        # ── Step 3: Verify import ──────────────────────────────────────
+        if "$ENV_BIN/python" -c "import forge_io; from forge_cv.solver import solve_alignment" 2>/dev/null; then
+            ok "forge_io + forge_cv imports OK"
+        else
+            warn "forge_cv import check failed — check install output above"
+        fi
+
+        # ── Step 4: Install ffmpeg (via conda, into the env) ─────────
+        # ffmpeg + ffprobe: forge-io v0.4.0+ decodes .mov/.mp4/... containers with
+        # them (hook injects FORGE_FFMPEG_PATH / FORGE_FFPROBE_PATH from this env);
+        # also used by the hook's .mxf fallback and ffprobe fps probe.
+        echo ""
+        if "$ENV_BIN/ffmpeg" -version &>/dev/null 2>&1; then
+            ok "ffmpeg found in env"
+        else
+            info "Installing ffmpeg into '$ENV_NAME'..."
+            conda install -n "$ENV_NAME" -c conda-forge ffmpeg -y 2>&1 | tail -3
+            if "$ENV_BIN/ffmpeg" -version &>/dev/null 2>&1; then
+                ok "ffmpeg installed"
+            else
+                warn "ffmpeg install failed — MOV/MP4/MXF reference extraction won't work"
+                warn "Install manually: conda install -n $ENV_NAME -c conda-forge ffmpeg"
+            fi
         fi
     fi
 

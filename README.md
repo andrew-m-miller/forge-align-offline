@@ -77,6 +77,24 @@ import sys; [sys.modules.pop(k) for k in list(sys.modules) if 'forge_cv_align' i
 # Then: Rescan Python Hooks
 ```
 
+### Offline / air-gapped install (linux-64)
+
+The **Offline bundle** workflow (`.github/workflows/offline-bundle.yml`) builds a self-contained bundle on Rocky Linux 9.5: a [conda-pack](https://conda.github.io/conda-pack/)'d env with every dependency (OIIO, OCIO, ffmpeg, OpenCV, forge-io, CPU SuperPoint/LightGlue + weights), plus the hook and installers. It then installs and self-tests the bundle in a Rocky 9.5 container with networking disabled.
+
+- Run it from **Actions → Offline bundle → Run workflow** (or push any change under `packaging/`) and download the `offline-bundle` artifact.
+- Pushing a `v*` tag also attaches `forge-align-offline-<tag>-linux-64.tar` to the GitHub release.
+
+On the air-gapped machine:
+
+```bash
+sha256sum -c forge-align-offline-*-linux-64.tar.sha256
+tar -xf forge-align-offline-*-linux-64.tar
+cd forge-align-offline-*-linux-64
+bash install_offline.sh --global
+```
+
+See [packaging/README_OFFLINE.md](packaging/README_OFFLINE.md) for options. To build locally, run `bash packaging/build_bundle.sh` on a Rocky/RHEL 9 host with `conda`, `conda-pack` and `git`.
+
 ## Validation
 
 Quick read smoke. Dispatches on extension exactly like the solver does:

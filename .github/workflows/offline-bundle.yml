@@ -1,0 +1,121 @@
+name: Offline bundle (linux-64)
+
+# Builds a conda-pack'd bundle for air-gapped Rocky Linux / RHEL 9 installs,
+# tests it in a Rocky 9.5 container with networking disabled, and attaches
+# it to the GitHub release on v* tags.
+
+on:
+  workflow_dispatch:
+    inputs:
+      with_superpoint:
+        description: Include SuperPoint (CPU torch + LightGlue, ~+250 MB)
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+    branches: ["**"]
+    paths:
+      - "packaging/**"
+      - ".github/workflows/offline-bundle.yml"
+      - "pyproject.toml"
+      - "install.sh"
+      - "uninstall.sh"
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/offline-bundle.yml"
+      - "pyproject.toml"
+      - "install.sh"
+      - "uninstall.sh"
+
+env:
+  ROCKY_IMAGE: rockylinux/rockylinux:9.5
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Build on the target distro so pip picks wheels for its glibc (2.34).
+    container: rockylinux/rockylinux:9.5
+    outputs:
+      bundle: ${{ steps.build.outputs.bundle }}
+    steps:
+      - name: Install build tools
+        run: dnf install -y git tar gzip bzip2 findutils which diffutils && dnf clean all
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Miniforge + conda-pack
+        run: |
+          curl -fsSL -o /tmp/miniforge.sh \
+            https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+          bash /tmp/miniforge.sh -b -p /opt/miniforge
+          /opt/miniforge/bin/conda install -n base -y conda-pack
+          echo /opt/miniforge/bin >> "$GITHUB_PATH"
+
+      - name: Build bundle
+        id: build
+        env:
+          WITH_SUPERPOINT: ${{ (github.event_name != 'workflow_dispatch' || inputs.with_superpoint) && '1' || '0' }}
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          OUT_DIR="$PWD/dist" bash packaging/build_bundle.sh
+          echo "bundle=$(cd dist && ls forge-align-offline-*.tar)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offline-bundle
+          path: dist/forge-align-offline-*
+          compression-level: 0
+          retention-days: 30
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: offline-bundle
+          path: dist
+
+      - name: Build test image (Rocky 9.5 + Miniforge, stands in for Anaconda)
+        run: |
+          docker build -t forge-offline-test - <<EOF
+          FROM ${ROCKY_IMAGE}
+          RUN dnf install -y tar gzip findutils which diffutils procps-ng && dnf clean all
+          RUN curl -fsSL -o /tmp/miniforge.sh \
+                https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh \
+           && bash /tmp/miniforge.sh -b -p /opt/conda && rm /tmp/miniforge.sh
+          ENV PATH=/opt/conda/bin:\$PATH
+          EOF
+
+      - name: Install + test bundle with networking disabled
+        run: |
+          (cd dist && sha256sum -c *.tar.sha256)
+          docker run --rm --network none -v "$PWD:/work:ro" forge-offline-test \
+            bash /work/packaging/test_bundle.sh "/work/dist/${{ needs.build.outputs.bundle }}"
+
+  release:
+    needs: [build, test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: offline-bundle
+          path: dist
+
+      - name: Attach bundle to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes \
+                 "Offline bundle for air-gapped linux-64 (Rocky/RHEL 9). See README_OFFLINE.md inside the tar."
+          gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber dist/forge-align-offline-*

@@ -1,0 +1,14 @@
+# Conda side of the offline bundle (see packaging/build_bundle.sh).
+# Native libs come from conda-forge; opencv, forge-io, forge-align and the
+# optional SuperPoint stack are pip-installed on top by the build script.
+name: forge-cv
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - py-openimageio
+  - py-opencolorio
+  - ffmpeg

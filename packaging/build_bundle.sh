@@ -115,6 +115,8 @@ cp "$REPO_DIR"/{install.sh,uninstall.sh,README.md} "$STAGE/"
 cp -R "$REPO_DIR/scripts" "$STAGE/"
 find "$STAGE" -name "__pycache__" -prune -exec rm -rf {} +
 echo "$VERSION" > "$STAGE/VERSION"
+# conda-pack writes its archive 0600; other users on the target must read it.
+chmod -R a+rX "$STAGE"
 
 (cd "$STAGE" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 

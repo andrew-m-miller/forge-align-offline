@@ -33,6 +33,7 @@ step "Extract bundle"
 tar -xf "$BUNDLE_TAR" -C "$WORK"
 BUNDLE_DIR="$(echo "$WORK"/forge-align-offline-*)"
 ls -la "$BUNDLE_DIR" "$BUNDLE_DIR/env"
+[[ -z "$(find "$BUNDLE_DIR" -type f ! -perm -a+r)" ]] || fail "bundle has files other users can't read"
 
 step "Install into conda envs dir, global deploy"
 bash "$BUNDLE_DIR/install_offline.sh" --env forge-cv --global < /dev/null

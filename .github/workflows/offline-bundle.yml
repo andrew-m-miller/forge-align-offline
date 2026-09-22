@@ -52,14 +52,17 @@ jobs:
             https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
           bash /tmp/miniforge.sh -b -p /opt/miniforge
           /opt/miniforge/bin/conda install -n base -y conda-pack
-          echo /opt/miniforge/bin >> "$GITHUB_PATH"
 
       - name: Build bundle
         id: build
         env:
           WITH_SUPERPOINT: ${{ (github.event_name != 'workflow_dispatch' || inputs.with_superpoint) && '1' || '0' }}
           VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        # Not via $GITHUB_PATH: the Rocky image sets no PATH in its config, so
+        # that would leave only the miniforge dir on PATH (no sh).
+        shell: bash
         run: |
+          export PATH="/opt/miniforge/bin:$PATH"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           OUT_DIR="$PWD/dist" bash packaging/build_bundle.sh
           echo "bundle=$(cd dist && ls forge-align-offline-*.tar)" >> "$GITHUB_OUTPUT"
